@@ -6,7 +6,8 @@ import { gotScraping } from 'got-scraping';
 await Actor.init();
 
 const HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache',
@@ -74,14 +75,24 @@ const parseFiltersFromUrl = (urlString, defaults) => {
 };
 
 const deriveJobType = (tags = []) => {
-    const tag = tags.find((t) => /full.?time|part.?time|contract|freelance|internship|temporary/i.test(t));
+    const tag = tags.find((t) =>
+        /full.?time|part.?time|contract|freelance|internship|temporary/i.test(t)
+    );
     return tag || null;
 };
 
 const matchesSearch = (job, filters) => {
     if (!filters.searchQueryLower) return true;
-    const haystacks = [job.position, job.company, job.location, job.description, Array.isArray(job.tags) ? job.tags.join(' ') : null];
-    return haystacks.some((value) => typeof value === 'string' && value.toLowerCase().includes(filters.searchQueryLower));
+    const haystacks = [
+        job.position,
+        job.company,
+        job.location,
+        job.description,
+        Array.isArray(job.tags) ? job.tags.join(' ') : null,
+    ];
+    return haystacks.some(
+        (value) => typeof value === 'string' && value.toLowerCase().includes(filters.searchQueryLower)
+    );
 };
 
 const matchesLocation = (job, filters) => {
@@ -151,20 +162,22 @@ const transformJob = (job, filters) => {
     };
 };
 
-// ✅ FIXED FETCH FUNCTION
+// ✅ Robust fetchJobs with Cloudflare/HTML detection + retries
 const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
-    // Cache jobs for 5 minutes
     if (cachedJobs && cachedJobs.timestamp > Date.now() - 5 * 60 * 1000) {
         return cachedJobs.jobs;
     }
 
     const options = {
         url: 'https://remoteok.com/api',
-        headers: HEADERS,
+        headers: {
+            ...HEADERS,
+            Referer: 'https://remoteok.com/',
+            Origin: 'https://remoteok.com',
+        },
         timeout: 45_000,
         responseType: 'text',
         proxyUrl,
-        // ✅ Correctly attach Crawlee session object
         sessionToken: session,
     };
 
@@ -172,26 +185,42 @@ const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
             response = await gotScraping(options);
-            break;
+            const body = response.body?.trim();
+
+            // Detect non-JSON (HTML / Cloudflare)
+            if (!body || body.startsWith('<!DOCTYPE html') || body.startsWith('<html')) {
+                crawlerLog.warning(`Received non-JSON response on attempt ${attempt}`);
+                await delay(1000 * attempt);
+                continue;
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(body);
+            } catch {
+                crawlerLog.warning(`JSON parse failed on attempt ${attempt}`);
+                await delay(1000 * attempt);
+                continue;
+            }
+
+            const jobs = Array.isArray(parsed)
+                ? parsed.filter((j) => j && j.id)
+                : [];
+            if (jobs.length > 0) {
+                cachedJobs = { timestamp: Date.now(), jobs };
+                crawlerLog.info(`Fetched ${jobs.length} jobs from RemoteOK API`);
+                return jobs;
+            }
+
+            crawlerLog.warning(`Parsed empty job list, retrying (${attempt}/3)...`);
+            await delay(1000 * attempt);
         } catch (err) {
-            crawlerLog.warning(`Attempt ${attempt} to fetch jobs failed: ${err.message}`);
-            if (attempt === 3) throw err;
+            crawlerLog.warning(`Fetch attempt ${attempt} failed: ${err.message}`);
             await delay(1000 * attempt);
         }
     }
 
-    let parsed;
-    try {
-        parsed = JSON.parse(response.body);
-    } catch (err) {
-        throw new Error(`Unable to parse RemoteOK API response: ${err.message}`);
-    }
-
-    const jobs = Array.isArray(parsed) ? parsed.filter((item) => item && item.id) : [];
-    cachedJobs = { timestamp: Date.now(), jobs };
-
-    crawlerLog.info(`Fetched ${jobs.length} jobs from RemoteOK API`);
-    return jobs;
+    throw new Error('Failed to retrieve valid job data from RemoteOK after 3 attempts.');
 };
 
 // 🧠 MAIN EXECUTION
@@ -207,11 +236,15 @@ async function main() {
             proxyConfiguration,
         } = input;
 
-        const maxItems = Number.isFinite(+rawMaxItems) ? Math.max(1, +rawMaxItems) : Number.MAX_SAFE_INTEGER;
+        const maxItems = Number.isFinite(+rawMaxItems)
+            ? Math.max(1, +rawMaxItems)
+            : Number.MAX_SAFE_INTEGER;
         const defaults = {
             searchQuery: normalize(searchQuery),
             location: normalize(location),
-            dateFilter: ['today', 'week', 'month'].includes(dateFilter) ? dateFilter : 'all',
+            dateFilter: ['today', 'week', 'month'].includes(dateFilter)
+                ? dateFilter
+                : 'all',
         };
 
         const initialRequests = [];
@@ -227,13 +260,20 @@ async function main() {
             const filters = buildFilters({ ...defaults });
             initialRequests.push({
                 url: 'https://remoteok.com/api',
-                userData: { filters, label: 'DEFAULT', originalUrl: 'https://remoteok.com/remote-jobs' },
+                userData: {
+                    filters,
+                    label: 'DEFAULT',
+                    originalUrl: 'https://remoteok.com/remote-jobs',
+                },
             });
         }
 
         const proxyConfig = proxyConfiguration
             ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
-            : await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] });
+            : await Actor.createProxyConfiguration({
+                  useApifyProxy: true,
+                  apifyProxyGroups: ['RESIDENTIAL'],
+              });
 
         let saved = 0;
         const seenIds = new Set();
@@ -248,7 +288,7 @@ async function main() {
             sessionPoolOptions: {
                 maxPoolSize: 20,
                 sessionOptions: {
-                    maxAgeSecs: 1_800,
+                    maxAgeSecs: 1800,
                     maxUsageCount: 10,
                 },
             },
@@ -262,11 +302,17 @@ async function main() {
 
                 const { filters, label, originalUrl } = request.userData || {};
                 const activeFilters = filters || buildFilters({ ...defaults });
-                crawlerLog.info(`Processing ${label || 'REQUEST'} (${originalUrl || request.url})`);
+                crawlerLog.info(
+                    `Processing ${label || 'REQUEST'} (${originalUrl || request.url})`
+                );
 
                 let jobs;
                 try {
-                    jobs = await fetchJobs({ proxyUrl: proxyInfo?.url, session, crawlerLog });
+                    jobs = await fetchJobs({
+                        proxyUrl: proxyInfo?.url,
+                        session,
+                        crawlerLog,
+                    });
                 } catch (error) {
                     crawlerLog.exception(error, 'Failed to fetch jobs from RemoteOK API');
                     throw error;
@@ -284,17 +330,27 @@ async function main() {
                     await Dataset.pushData(item);
                     seenIds.add(job.id);
                     saved += 1;
-                    crawlerLog.info(`Saved ${saved}/${maxItems}: ${item.title || 'Untitled'} @ ${item.company || 'Unknown'}`);
+                    crawlerLog.info(
+                        `Saved ${saved}/${maxItems}: ${item.title || 'Untitled'} @ ${
+                            item.company || 'Unknown'
+                        }`
+                    );
                 }
 
                 if (saved === 0) {
-                    crawlerLog.warning('No jobs matched the provided filters. Consider relaxing search/location/date constraints.');
+                    crawlerLog.warning(
+                        'No jobs matched the provided filters. Consider relaxing search/location/date constraints.'
+                    );
                 }
             },
         });
 
-        log.info(`Starting RemoteOK crawler with ${initialRequests.length} filter set(s).`);
-        log.info(`Filters: search="${defaults.searchQuery}", location="${defaults.location}", dateFilter="${defaults.dateFilter}", maxItems=${maxItems}`);
+        log.info(
+            `Starting RemoteOK crawler with ${initialRequests.length} filter set(s).`
+        );
+        log.info(
+            `Filters: search="${defaults.searchQuery}", location="${defaults.location}", dateFilter="${defaults.dateFilter}", maxItems=${maxItems}`
+        );
 
         await crawler.run(initialRequests);
 

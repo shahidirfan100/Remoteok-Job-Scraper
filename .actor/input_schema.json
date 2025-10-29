@@ -1,58 +1,59 @@
 {
-  "title": "RemoteOK Job Scraper",
-  "description": "Scrape job listings from RemoteOK (https://remoteok.com/remote-jobs). Collects comprehensive job data including title, company, location, job type, category, salary, and descriptions.",
+  "title": "Remoteok Job Scraper Input",
+  "description": "Scrape remote job listings from Remoteok.com or custom job API endpoints. Filter by keywords, location, and job posting date.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "startUrls": {
-      "title": "Start URLs",
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "description": "Custom RemoteOK listing URLs to start scraping from. If provided, these will override the search query.",
-      "editor": "stringList"
-    },
-    "searchQuery": {
-      "title": "Search Query",
+    "url": {
+      "title": "API URL",
       "type": "string",
-      "description": "Keyword to filter job searches on RemoteOK.",
+      "description": "Custom API endpoint URL. If not provided, uses Remoteok's default JSON API (https://remoteok.com/remote-jobs.json). Should return JSON array of job objects.",
       "editor": "textfield",
-      "prefill": "software engineer"
+      "prefill": "https://remoteok.com/remote-jobs.json"
+    },
+    "keyword": {
+      "title": "Search Keyword",
+      "type": "string",
+      "description": "Keyword to filter jobs (e.g., 'python', 'developer', 'designer'). If empty, all jobs will be returned. The keyword is matched against job titles, companies, descriptions, and tags.",
+      "editor": "textfield",
+      "prefill": "developer"
     },
     "location": {
-      "title": "Location",
+      "title": "Location Filter",
       "type": "string",
-      "description": "Location filter for job searches (optional).",
+      "description": "Filter jobs by location (e.g., 'San Francisco', 'New York', 'Remote'). Case-insensitive partial matching.",
       "editor": "textfield"
     },
-    "dateFilter": {
-      "title": "Date Filter",
+    "jobDate": {
+      "title": "Minimum Job Date",
       "type": "string",
-      "description": "Filter jobs by posting date when using keyword search.",
-      "editor": "select",
-      "enum": ["all", "today", "week", "month"],
-      "default": "all"
+      "description": "Filter jobs posted after this date (YYYY-MM-DD format). Example: '2024-01-01'",
+      "editor": "textfield",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
     },
-    "maxItems": {
-      "title": "Maximum number of jobs",
+    "maxJobs": {
+      "title": "Maximum Jobs",
       "type": "integer",
-      "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
-      "minimum": 1,
+      "description": "Maximum number of jobs to collect. Set to 0 for unlimited (will process all matching jobs).",
+      "minimum": 0,
       "default": 100,
       "editor": "number"
     },
+    "batchSize": {
+      "title": "Batch Size",
+      "type": "integer",
+      "description": "Number of jobs to process in each batch. Larger batches are faster but use more memory.",
+      "minimum": 1,
+      "default": 50,
+      "editor": "number"
+    },
     "proxyConfiguration": {
-      "title": "Proxy configuration",
+      "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Proxy for stable scraping of RemoteOK.",
+      "description": "Proxy settings for accessing the job API. Use Apify Proxy for best results.",
       "editor": "proxy",
-      "default": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
-      }
+      "default": { "useApifyProxy": false }
     }
   },
-  "required": [],
-  "additionalProperties": false
+  "required": []
 }

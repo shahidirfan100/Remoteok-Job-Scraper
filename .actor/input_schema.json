@@ -1,0 +1,58 @@
+{
+  "title": "RemoteOK Job Scraper",
+  "description": "Scrape job listings from RemoteOK (https://remoteok.com/remote-jobs). Collects comprehensive job data including title, company, location, job type, category, salary, and descriptions.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Custom RemoteOK listing URLs to start scraping from. If provided, these will override the search query.",
+      "editor": "stringList"
+    },
+    "searchQuery": {
+      "title": "Search Query",
+      "type": "string",
+      "description": "Keyword to filter job searches on RemoteOK.",
+      "editor": "textfield",
+      "prefill": "software engineer"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Location filter for job searches (optional).",
+      "editor": "textfield"
+    },
+    "dateFilter": {
+      "title": "Date Filter",
+      "type": "string",
+      "description": "Filter jobs by posting date when using keyword search.",
+      "editor": "select",
+      "enum": ["all", "today", "week", "month"],
+      "default": "all"
+    },
+    "maxItems": {
+      "title": "Maximum number of jobs",
+      "type": "integer",
+      "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
+      "minimum": 1,
+      "default": 100,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for stable scraping of RemoteOK.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

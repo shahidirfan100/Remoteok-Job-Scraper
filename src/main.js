@@ -38,7 +38,7 @@ async function main() {
         if (Array.isArray(startUrls) && startUrls.length) initial.push(...startUrls);
         if (!initial.length) initial.push(buildStartUrl(searchQuery, location, dateFilter));
 
-        const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
+        const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] });
 
         let saved = 0;
 
@@ -139,8 +139,9 @@ async function main() {
                 const pageNo = request.userData?.pageNo || 1;
 
                 if (label === 'LIST') {
+                    crawlerLog.info(`LIST ${request.url} -> page HTML length: ${$.html().length}`);
                     const links = findJobLinks($, request.url);
-                    crawlerLog.info(`LIST ${request.url} -> found ${links.length} links`);
+                    crawlerLog.info(`LIST ${request.url} -> found ${links.length} links: ${links.slice(0,5).join(', ')}`);
 
                     const remaining = MAX_ITEMS - saved;
                     const toEnqueue = links.slice(0, Math.max(0, remaining));
@@ -204,6 +205,8 @@ async function main() {
                 }
             }
         });
+
+        log.info(`Starting crawler with ${initial.length} initial URLs: ${initial.join(', ')}`);
 
         await crawler.run(initial.map(u => ({ url: u, userData: { label: 'LIST', pageNo: 1 } })));
         log.info(`Finished. Saved ${saved} items`);

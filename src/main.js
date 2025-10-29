@@ -151,7 +151,9 @@ const transformJob = (job, filters) => {
     };
 };
 
+// ✅ FIXED FETCH FUNCTION
 const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
+    // Cache jobs for 5 minutes
     if (cachedJobs && cachedJobs.timestamp > Date.now() - 5 * 60 * 1000) {
         return cachedJobs.jobs;
     }
@@ -161,12 +163,22 @@ const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
         headers: HEADERS,
         timeout: 45_000,
         responseType: 'text',
+        proxyUrl,
+        // ✅ Correctly attach Crawlee session object
+        sessionToken: session,
     };
 
-    if (proxyUrl) options.proxyUrl = proxyUrl;
-    if (session) options.sessionToken = session;
-
-    const response = await gotScraping(options);
+    let response;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            response = await gotScraping(options);
+            break;
+        } catch (err) {
+            crawlerLog.warning(`Attempt ${attempt} to fetch jobs failed: ${err.message}`);
+            if (attempt === 3) throw err;
+            await delay(1000 * attempt);
+        }
+    }
 
     let parsed;
     try {
@@ -182,6 +194,7 @@ const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
     return jobs;
 };
 
+// 🧠 MAIN EXECUTION
 async function main() {
     try {
         const input = (await Actor.getInput()) || {};

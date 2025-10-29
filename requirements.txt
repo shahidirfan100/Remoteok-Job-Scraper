@@ -5,7 +5,7 @@ apify < 4.0.0
 crawlee[beautifulsoup]
 
 # Ultra-lightweight stealth HTTP scraper
-stealthkit
+stealthkit>=0.3.0
 
 # HTML parsing for stealthkit or httpx fallback
 beautifulsoup4

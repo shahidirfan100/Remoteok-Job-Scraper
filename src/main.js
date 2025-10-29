@@ -164,6 +164,7 @@ const fetchJobs = async ({ proxyUrl, session, crawlerLog }) => {
     };
 
     if (proxyUrl) options.proxyUrl = proxyUrl;
+    if (session) options.sessionToken = session;
 
     const response = await gotScraping(options);
 

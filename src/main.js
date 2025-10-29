@@ -42,24 +42,26 @@ async function main() {
                     maxAgeSecs: 1800,
                 },
             },
-            maxConcurrency: 3,
-            requestHandlerTimeoutSecs: 120,
+            maxConcurrency: 2,
+            requestHandlerTimeoutSecs: 180,
+            navigationTimeoutSecs: 120,
+            ignoreSslErrors: true,
             additionalHttpRequestOptions: {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
                     'Cache-Control': 'max-age=0',
                     'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
                     'Sec-Ch-Ua-Mobile': '?0',
                     'Sec-Ch-Ua-Platform': '"Windows"',
                     'Sec-Fetch-Dest': 'document',
                     'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'same-origin',
+                    'Sec-Fetch-Site': 'none',
                     'Sec-Fetch-User': '?1',
                     'Upgrade-Insecure-Requests': '1',
-                    'Referer': 'https://remoteok.com/',
+                    'Connection': 'keep-alive',
                 },
             },
             preNavigationHooks: [
@@ -72,14 +74,44 @@ async function main() {
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
                 crawlerLog.info(`Processing: ${request.url}`);
                 
-                // RemoteOK stores job data in table rows with data-* attributes
-                const jobRows = $('tr.job[data-url]');
-                crawlerLog.info(`Found ${jobRows.length} job rows on page`);
-
+                // Log page info for debugging
+                const pageTitle = $('title').text();
+                const htmlLength = $.html().length;
+                crawlerLog.info(`Page title: "${pageTitle}"`);
+                crawlerLog.info(`HTML length: ${htmlLength} characters`);
+                
+                // Try multiple selector strategies for RemoteOK
+                let jobRows = $('tr.job[data-url]');
+                crawlerLog.info(`Strategy 1 - tr.job[data-url]: ${jobRows.length} jobs`);
+                
                 if (jobRows.length === 0) {
-                    crawlerLog.warning('No job rows found - page structure may have changed or JavaScript required');
-                    crawlerLog.info(`Page title: ${$('title').text()}`);
-                    crawlerLog.info(`HTML length: ${$.html().length}`);
+                    jobRows = $('tr[data-url]');
+                    crawlerLog.info(`Strategy 2 - tr[data-url]: ${jobRows.length} jobs`);
+                }
+                
+                if (jobRows.length === 0) {
+                    jobRows = $('tr[data-id]');
+                    crawlerLog.info(`Strategy 3 - tr[data-id]: ${jobRows.length} jobs`);
+                }
+                
+                if (jobRows.length === 0) {
+                    jobRows = $('table tr').filter((i, el) => {
+                        return $(el).attr('data-url') || $(el).attr('data-id');
+                    });
+                    crawlerLog.info(`Strategy 4 - table tr with data attrs: ${jobRows.length} jobs`);
+                }
+                
+                if (jobRows.length === 0) {
+                    // Log sample HTML for debugging
+                    const sampleHtml = $.html().substring(0, 2000);
+                    crawlerLog.warning('No job rows found with any strategy');
+                    crawlerLog.info(`Sample HTML (first 2000 chars):\n${sampleHtml}`);
+                    
+                    // Check if we're being blocked or redirected
+                    const bodyText = $('body').text();
+                    if (bodyText.includes('cloudflare') || bodyText.includes('blocked') || bodyText.includes('captcha')) {
+                        crawlerLog.error('Possible bot detection/blocking detected');
+                    }
                 }
 
                 jobRows.each((index, row) => {
@@ -89,31 +121,34 @@ async function main() {
                         const $row = $(row);
                         
                         // Extract data from data attributes and HTML
-                        const jobId = $row.attr('data-id') || null;
-                        const jobUrl = $row.attr('data-url') || null;
+                        const jobId = $row.attr('data-id') || $row.attr('id') || null;
+                        const jobUrl = $row.attr('data-url') || $row.find('a.preventLink').attr('href') || null;
                         
                         // Skip if already processed
                         if (jobId && seenJobs.has(jobId)) return;
                         if (jobId) seenJobs.add(jobId);
 
-                        // Extract job details from table cells
+                        // Extract job details from table cells - multiple strategies
                         const company = $row.find('.company h3').text().trim() || 
                                       $row.find('.companyLink').text().trim() || 
+                                      $row.find('h3[itemprop="name"]').text().trim() ||
                                       $row.attr('data-company') || null;
                         
                         const title = $row.find('.position').text().trim() || 
-                                    $row.find('h2[itemprop="title"]').text().trim() || 
+                                    $row.find('h2[itemprop="title"]').text().trim() ||
+                                    $row.find('h2').first().text().trim() ||
                                     $row.attr('data-position') || null;
                         
                         const location = $row.find('.location').text().trim() || 
+                                       $row.find('.region').text().trim() ||
                                        $row.attr('data-location') || 
                                        'Remote';
                         
                         // Extract tags for job type and category
                         const tags = [];
-                        $row.find('.tags .tag').each((_, tag) => {
+                        $row.find('.tags .tag, .tag').each((_, tag) => {
                             const tagText = $(tag).text().trim();
-                            if (tagText) tags.push(tagText);
+                            if (tagText && !tags.includes(tagText)) tags.push(tagText);
                         });
 
                         const job_type = tags.find(t => /full.?time|part.?time|contract|freelance|internship/i.test(t)) || null;
@@ -121,18 +156,22 @@ async function main() {
 
                         // Extract salary/compensation
                         const salary = $row.find('.salary').text().trim() || 
-                                     $row.find('[data-salary]').attr('data-salary') || null;
+                                     $row.find('[data-salary]').attr('data-salary') ||
+                                     $row.find('.compensation').text().trim() || null;
 
                         // Extract date
                         const datePosted = $row.find('time').attr('datetime') || 
                                          $row.find('.time').text().trim() || 
+                                         $row.find('time').text().trim() ||
                                          $row.attr('data-date') || null;
 
                         // Build job URL
                         const fullJobUrl = jobUrl ? `https://remoteok.com${jobUrl}` : null;
 
-                        // For description, we need to fetch individual job page or use preview
-                        const descriptionPreview = $row.find('.description').text().trim() || null;
+                        // For description, extract from row
+                        const descriptionPreview = $row.find('.description').text().trim() || 
+                                                  $row.find('.markdown').text().trim() ||
+                                                  null;
 
                         const item = {
                             title: title || null,
@@ -152,24 +191,26 @@ async function main() {
                         if (item.title || item.company) {
                             Dataset.pushData(item);
                             saved++;
-                            crawlerLog.info(`Saved job ${saved}/${MAX_ITEMS}: ${item.title} at ${item.company}`);
+                            crawlerLog.info(`✓ Saved job ${saved}/${MAX_ITEMS}: ${item.title} at ${item.company}`);
+                        } else {
+                            crawlerLog.warning(`Skipped row ${index} - no title or company found`);
                         }
 
                     } catch (err) {
-                        crawlerLog.error(`Error processing job row: ${err.message}`);
+                        crawlerLog.error(`Error processing job row ${index}: ${err.message}`);
                     }
                 });
 
                 // Handle pagination
-                if (saved < MAX_ITEMS) {
+                if (saved < MAX_ITEMS && jobRows.length > 0) {
                     const pageNo = request.userData?.pageNo || 1;
                     
-                    // RemoteOK uses URL pattern for pagination
-                    const currentUrl = new URL(request.url);
-                    const nextPageNo = pageNo + 1;
-                    
-                    // Check if there are more jobs on the page
-                    if (jobRows.length > 0 && jobRows.length >= 10) {
+                    // Only paginate if we found jobs on this page
+                    if (jobRows.length >= 5) {
+                        // RemoteOK uses URL pattern for pagination
+                        const currentUrl = new URL(request.url);
+                        const nextPageNo = pageNo + 1;
+                        
                         // Build next page URL
                         currentUrl.searchParams.set('page', nextPageNo);
                         const nextUrl = currentUrl.href;
@@ -178,16 +219,20 @@ async function main() {
                             urls: [nextUrl], 
                             userData: { pageNo: nextPageNo } 
                         });
-                        crawlerLog.info(`Enqueued next page: ${nextUrl}`);
+                        crawlerLog.info(`→ Enqueued next page ${nextPageNo}: ${nextUrl}`);
+                    } else {
+                        crawlerLog.info(`Stopping pagination - only ${jobRows.length} jobs found on page ${pageNo}`);
                     }
                 }
             }
         });
 
-        log.info(`Starting crawler with ${initial.length} initial URLs: ${initial.join(', ')}`);
+        log.info(`🚀 Starting crawler with ${initial.length} initial URLs: ${initial.join(', ')}`);
+        log.info(`📊 Settings: maxItems=${MAX_ITEMS}, searchQuery="${searchQuery}", location="${location}", dateFilter="${dateFilter}"`);
 
         await crawler.run(initial.map(u => ({ url: u, userData: { pageNo: 1 } })));
-        log.info(`Finished. Saved ${saved} items`);
+        
+        log.info(`✅ Finished. Saved ${saved} items`);
     } finally {
         await Actor.exit();
     }

@@ -1,6 +1,10 @@
 {
-  "searchQuery": "software engineer",
-  "location": "remote",
-  "dateFilter": "month",
-  "maxItems": 10
+  "searchQuery": "",
+  "location": "",
+  "dateFilter": "all",
+  "maxItems": 20,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
 }

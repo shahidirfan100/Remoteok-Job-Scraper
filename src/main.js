@@ -1,22 +1,26 @@
-// RemoteOK job scraper with Crawlee + Apify SDK + gotScraping (HTTP)
-// Features: pagination, keyword/location/date filters, strong anti-blocking measures.
+// RemoteOK RSS Job Scraper using Apify SDK + Crawlee + gotScraping
+// Features: keyword/location/date filters, anti-blocking headers, dataset output.
+// Works via RSS feed (no Cloudflare challenge).
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
+import { gotScraping } from 'got-scraping';
 
 await Actor.init();
 
-const BASE_URL = 'https://remoteok.com/remote-jobs';
+// ====== CONFIG ======
+const RSS_URL = 'https://remoteok.com/rss';
 const DATE_WINDOWS = {
     today: 24 * 60 * 60 * 1000,
     week: 7 * 24 * 60 * 60 * 1000,
     month: 31 * 24 * 60 * 60 * 1000,
 };
 
-// ---- helpers ----
+// ====== HELPERS ======
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-const randomDelay = async (min = 1000, max = 2500) =>
+const randomDelay = async (min = 500, max = 1500) =>
     delay(Math.random() * (max - min) + min);
+
 const stripHtml = (html) =>
     html?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() || '';
 
@@ -26,108 +30,82 @@ const USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; rv:118.0) Gecko/20100101 Firefox/118.0',
 ];
+
 const BASE_HEADERS = {
+    'Accept': 'application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache',
     'Pragma': 'no-cache',
     'Connection': 'keep-alive',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Referer': 'https://google.com/',
-    'Origin': 'https://remoteok.com',
 };
 
-const DATE_FILTERS = DATE_WINDOWS;
-const buildUrl = ({ searchQuery, location, page }) => {
-    const p = new URLSearchParams();
-    if (searchQuery) p.set('search', searchQuery);
-    if (location) p.set('location', location);
-    if (page > 1) p.set('pg', page);
-    const qs = p.toString() ? `?${p.toString()}` : '';
-    return `${BASE_URL}${qs}`;
-};
-
-// ---- parsing & filtering ----
-const parseJobs = ($) => {
+// ====== PARSING ======
+const parseRssItems = ($) => {
     const jobs = [];
-    $('tr.job').each((_, el) => {
+    $('item').each((_, el) => {
         const $el = $(el);
-        const title = $el.find('h2[itemprop="title"]').text().trim();
-        const company = $el.find('h3[itemprop="name"]').text().trim();
-        if (!title || !company) return;
-        const id = $el.attr('data-id') || null;
-        const location =
-            $el.find('.location').text().trim() || 'Worldwide';
-        const date = $el.find('time').attr('datetime') || null;
-        const tags = $el
-            .find('.tags .tag')
-            .map((i, t) => $(t).text().trim())
-            .get()
-            .filter(Boolean);
-        const href = $el.find('a.preventLink').attr('href') || '';
-        const url = href.startsWith('http')
-            ? href
-            : `https://remoteok.com${href}`;
-        const desc = stripHtml(
-            $el.find('.description, .expandContents').html() || ''
-        );
-        const logo =
-            $el.find('img.logo').attr('data-src') ||
-            $el.find('img.logo').attr('src') ||
-            null;
+        const title = $el.find('title').text().trim();
+        const link = $el.find('link').text().trim();
+        const pubDate = $el.find('pubDate').text().trim();
+        const descriptionHtml = $el.find('description').text();
+        const description = stripHtml(descriptionHtml);
+        const guid = $el.find('guid').text().trim() || link;
+        const category = $el.find('category').map((i, t) => $(t).text().trim()).get();
+
+        // Attempt to extract company & location from title or description
+        const titleParts = title.split(' at ');
+        const jobTitle = titleParts[0]?.trim() || title;
+        const company = titleParts[1]?.trim() || null;
+
         jobs.push({
-            id,
-            title,
+            id: guid,
+            title: jobTitle,
             company,
-            location,
-            date_posted: date,
-            tags: tags.length ? tags : null,
-            description_text: desc,
-            logo,
-            url,
-            source: 'remoteok.com',
+            location: null, // not directly in RSS; can infer later
+            tags: category.length ? category : null,
+            date_posted: pubDate || null,
+            description_text: description,
+            url: link,
+            source: 'remoteok.com/rss',
             collected_at: new Date().toISOString(),
         });
     });
     return jobs;
 };
 
+// ====== FILTERS ======
 const filterJobs = (jobs, { searchQuery, location, dateFilter }) => {
     const q = searchQuery?.toLowerCase() || '';
     const loc = location?.toLowerCase() || '';
-    const win = DATE_FILTERS[dateFilter] || null;
+    const windowMs = DATE_WINDOWS[dateFilter] || null;
     const now = Date.now();
 
-    return jobs.filter((j) => {
+    return jobs.filter((job) => {
         const text = [
-            j.title,
-            j.company,
-            j.description_text,
-            j.tags?.join(' '),
+            job.title,
+            job.company,
+            job.description_text,
+            job.tags?.join(' '),
         ]
+            .filter(Boolean)
             .join(' ')
             .toLowerCase();
+
         const kwOk = !q || text.includes(q);
-        const locOk = !loc || j.location?.toLowerCase().includes(loc);
+        const locOk = !loc || text.includes(loc);
+
         let dateOk = true;
-        if (win && j.date_posted) {
-            const t = Date.parse(j.date_posted);
-            if (Number.isFinite(t)) dateOk = now - t <= win;
+        if (windowMs && job.date_posted) {
+            const ts = Date.parse(job.date_posted);
+            if (Number.isFinite(ts)) dateOk = now - ts <= windowMs;
         }
+
         return kwOk && locOk && dateOk;
     });
 };
 
-const nextPageUrl = ($, currentUrl, currentPage, filters) => {
-    const href = $('a[rel="next"]').attr('href');
-    if (href)
-        return href.startsWith('http')
-            ? href
-            : new URL(href, BASE_URL).toString();
-    const next = currentPage + 1;
-    return buildUrl({ ...filters, page: next });
-};
-
-// ---- main ----
+// ====== MAIN ======
 async function main() {
     try {
         const input = (await Actor.getInput()) || {};
@@ -135,126 +113,87 @@ async function main() {
             searchQuery = '',
             location = '',
             dateFilter = 'all',
-            maxItems: rawMax = 200,
-            maxPages: rawPages = 10,
+            maxItems: rawMaxItems = 200,
             proxyConfiguration,
         } = input;
-        const maxItems = Number(rawMax) || 200;
-        const maxPages = Number(rawPages) || 10;
 
-        const proxyCfg = proxyConfiguration
-            ? await Actor.createProxyConfiguration(proxyConfiguration)
+        const maxItems = Number.isFinite(+rawMaxItems)
+            ? Math.max(1, +rawMaxItems)
+            : 200;
+
+        const proxyConfig = proxyConfiguration
+            ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
             : await Actor.createProxyConfiguration({
                   useApifyProxy: true,
-                  apifyProxyGroups: ['RESIDENTIAL', 'SHADER'],
+                  apifyProxyGroups: ['RESIDENTIAL'],
               });
 
-        const requestQueue = await Actor.openRequestQueue();
-        await requestQueue.addRequest({
-            url: buildUrl({ searchQuery, location, page: 1 }),
-            userData: { page: 1 },
-        });
-
         let saved = 0;
-        const seen = new Set();
 
         const crawler = new CheerioCrawler({
-            requestQueue,
-            proxyConfiguration: proxyCfg,
+            proxyConfiguration: proxyConfig,
             useSessionPool: true,
             sessionPoolOptions: {
-                maxPoolSize: 12,
+                maxPoolSize: 10,
                 sessionOptions: { maxAgeSecs: 1800, maxUsageCount: 10 },
             },
-            maxConcurrency: 2,
-            maxRequestRetries: 3,
-            requestHandlerTimeoutSecs: 180,
-            additionalMimeTypes: ['text/html'],
-
+            maxConcurrency: 1,
+            maxRequestRetries: 2,
+            requestHandlerTimeoutSecs: 90,
+            additionalMimeTypes: ['application/rss+xml', 'application/xml', 'text/xml'],
             preNavigationHooks: [
-                async ({ request }, gotoOpts) => {
+                async ({ request }, gotoOptions) => {
                     await randomDelay();
-                    gotoOpts.headers = {
+                    gotoOptions.headers = {
                         ...BASE_HEADERS,
                         'User-Agent':
-                            USER_AGENTS[
-                                Math.floor(Math.random() * USER_AGENTS.length)
-                            ],
+                            USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
                     };
-                    if (Math.random() < 0.4)
-                        gotoOpts.headers.Referer = 'https://duckduckgo.com/';
                 },
             ],
-
-            async requestHandler({ request, $, session, log: clog }) {
-                const { page = 1 } = request.userData;
-                const html = $.html();
-                if (/Cloudflare|Just a moment|captcha/i.test(html)) {
-                    clog.warning('Cloudflare detected; cooling off...');
-                    session.retire(); // rotate identity
-                    await delay(5000 + Math.random() * 3000);
-                    throw new Error('Cloudflare challenge detected');
-                }
-
-                const jobs = parseJobs($);
-                const filtered = filterJobs(jobs, {
+            async requestHandler({ $, log: crawlerLog }) {
+                if (!$) throw new Error('No RSS content parsed.');
+                const allJobs = parseRssItems($);
+                const filteredJobs = filterJobs(allJobs, {
                     searchQuery,
                     location,
                     dateFilter,
                 });
 
-                clog.info(
-                    `Page ${page}: ${filtered.length}/${jobs.length} jobs match filters`
+                crawlerLog.info(
+                    `Found ${filteredJobs.length}/${allJobs.length} jobs matching filters.`
                 );
 
-                for (const j of filtered) {
+                for (const job of filteredJobs) {
                     if (saved >= maxItems) break;
-                    const key = j.id || j.url;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    await Dataset.pushData(j);
+                    await Dataset.pushData(job);
                     saved++;
-                    clog.info(
-                        `Saved ${saved}/${maxItems}: ${j.title} @ ${j.company}`
+                    crawlerLog.info(`Saved ${saved}/${maxItems}: ${job.title}`);
+                }
+
+                if (saved === 0) {
+                    crawlerLog.warning(
+                        'No matching jobs. Try broadening filters or check feed availability.'
                     );
                 }
-
-                if (saved < maxItems && page < maxPages) {
-                    const nxt = nextPageUrl($, request.url, page, {
-                        searchQuery,
-                        location,
-                    });
-                    if (nxt) {
-                        await requestQueue.addRequest({
-                            url: nxt,
-                            userData: { page: page + 1 },
-                        });
-                    }
-                }
-            },
-
-            failedRequestHandler({ request, error }) {
-                log.warning(
-                    `❌ ${request.url} failed after retries: ${error.message}`
-                );
             },
         });
 
-        log.info(`🚀 Starting RemoteOK scraper:
+        log.info(`🚀 Starting RemoteOK RSS scraper with:
   - searchQuery: "${searchQuery}"
   - location: "${location}"
   - dateFilter: "${dateFilter}"
-  - maxItems: ${maxItems}
-  - maxPages: ${maxPages}`);
+  - maxItems: ${maxItems}`);
 
-        await crawler.run();
+        await crawler.run([{ url: RSS_URL }]);
+
         log.info(`🎯 Finished. Saved ${saved} jobs.`);
     } finally {
         await Actor.exit();
     }
 }
 
-main().catch((e) => {
-    console.error(e);
+main().catch((err) => {
+    console.error(err);
     process.exit(1);
 });

@@ -1,203 +1,206 @@
-"""Apify Actor entry point: Job Scraper (Python, JSON API).
-
-This Actor fetches job listings from Remoteok or custom JSON API endpoints. It extracts detailed
-information about job opportunities including titles, companies, locations, salaries, job types,
-posting dates, and descriptions. Supports filtering by keywords, location, and date.
+"""
+RemoteOK job scraper (Python version)
+Stack: Crawlee + BeautifulSoup + StealthKit + curl_cffi + httpx[http2] + lxml
+Fetches job listings directly from RemoteOK HTML pages with anti-blocking.
+Extracts: job title, company, location, job type, salary, description_html/text, logo, and tags.
 """
 
 from __future__ import annotations
-
 import asyncio
 import random
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
-from apify import Actor  # pyright: ignore[reportMissingImports]
-import httpx
+from apify import Actor  # type: ignore
+from bs4 import BeautifulSoup
+from curl_cffi.requests import AsyncSession
+from stealthkit import StealthConfig, StealthMiddleware  # stealthkit helps bypass Cloudflare
 
 
-def format_salary(salary_min: Optional[int], salary_max: Optional[int]) -> Optional[str]:
-    """Format salary range from Remoteok's salary_min and salary_max fields."""
-    if not salary_min and not salary_max:
+# ---------------- CONFIG ---------------- #
+REMOTEOK_URL = "https://remoteok.com/remote-jobs"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; rv:118.0) Gecko/20100101 Firefox/118.0",
+]
+
+
+def format_salary(min_salary: Optional[int], max_salary: Optional[int]) -> Optional[str]:
+    if not min_salary and not max_salary:
         return None
-    
-    if salary_min and salary_max:
-        return f"${salary_min:,} - ${salary_max:,}"
-    elif salary_min:
-        return f"${salary_min:,}+"
-    elif salary_max:
-        return f"Up to ${salary_max:,}"
-    return None
+    if min_salary and max_salary:
+        return f"${min_salary:,} - ${max_salary:,}"
+    if min_salary:
+        return f"${min_salary:,}+"
+    return f"Up to ${max_salary:,}" if max_salary else None
 
 
+# ---------------- SCRAPER ---------------- #
+async def fetch_html(session: AsyncSession, url: str) -> str:
+    """Fetch HTML content with stealth headers."""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://google.com/",
+        "Connection": "keep-alive",
+    }
+
+    resp = await session.get(url, headers=headers, timeout=45)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch {url}, status {resp.status_code}")
+    return resp.text
+
+
+def parse_jobs_from_html(html: str) -> List[Dict[str, Any]]:
+    """Extract job listings from RemoteOK HTML."""
+    soup = BeautifulSoup(html, "lxml")
+    job_rows = soup.select("tr.job")
+    jobs: List[Dict[str, Any]] = []
+
+    for row in job_rows:
+        try:
+            title_tag = row.select_one('h2[itemprop="title"]')
+            company_tag = row.select_one('h3[itemprop="name"]')
+            link_tag = row.select_one('a.preventLink')
+
+            title = title_tag.text.strip() if title_tag else None
+            company = company_tag.text.strip() if company_tag else None
+            url = f"https://remoteok.com{link_tag['href']}" if link_tag and link_tag.get("href") else None
+            if not title or not company or not url:
+                continue
+
+            location_tag = row.select_one(".location")
+            location = location_tag.text.strip() if location_tag else "Worldwide"
+
+            time_tag = row.select_one("time")
+            date_posted = time_tag["datetime"] if time_tag and time_tag.has_attr("datetime") else None
+
+            tags = [t.text.strip() for t in row.select(".tags .tag")]
+            desc_html = row.select_one(".description, .expandContents")
+            description_html = str(desc_html) if desc_html else None
+            description_text = desc_html.get_text(strip=True) if desc_html else None
+
+            salary = format_salary(None, None)  # RemoteOK hides salary in HTML
+
+            logo_tag = row.select_one("img.logo")
+            logo = logo_tag.get("data-src") or logo_tag.get("src") if logo_tag else None
+
+            job_type = None
+            for tag in tags:
+                if "full" in tag.lower():
+                    job_type = "Full-time"
+                elif "part" in tag.lower():
+                    job_type = "Part-time"
+                elif "contract" in tag.lower():
+                    job_type = "Contract"
+
+            jobs.append(
+                {
+                    "job_title": title,
+                    "company": company,
+                    "location": location,
+                    "job_type": job_type or "Remote",
+                    "job_url": url,
+                    "description_html": description_html,
+                    "description_text": description_text,
+                    "tags": tags,
+                    "salary": salary,
+                    "logo": logo,
+                    "date_posted": date_posted,
+                    "source_url": REMOTEOK_URL,
+                    "collected_at": datetime.utcnow().isoformat(),
+                }
+            )
+        except Exception:
+            continue
+
+    return jobs
+
+
+def filter_jobs(
+    jobs: List[Dict[str, Any]],
+    keyword: Optional[str],
+    location: Optional[str],
+    date_filter: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Apply filters: keyword, location, and date window."""
+    now = datetime.utcnow()
+    window_map = {"today": 1, "week": 7, "month": 31}
+    days_limit = window_map.get(date_filter, None)
+
+    filtered = []
+    for job in jobs:
+        text = " ".join(
+            [
+                job.get("job_title", ""),
+                job.get("company", ""),
+                job.get("location", ""),
+                " ".join(job.get("tags", [])),
+                job.get("description_text", "") or "",
+            ]
+        ).lower()
+
+        if keyword and keyword.lower() not in text:
+            continue
+
+        if location and location.lower() not in (job.get("location", "")).lower():
+            continue
+
+        if days_limit and job.get("date_posted"):
+            try:
+                dt = datetime.fromisoformat(job["date_posted"])
+                if (now - dt).days > days_limit:
+                    continue
+            except Exception:
+                pass
+
+        filtered.append(job)
+    return filtered
+
+
+# ---------------- MAIN ---------------- #
 async def main() -> None:
-    """Remoteok job scraper main entry."""
+    """Entry point for Apify actor."""
     async with Actor:
         actor_input = await Actor.get_input() or {}
+        keyword = actor_input.get("keyword")
+        location = actor_input.get("location")
+        date_filter = actor_input.get("dateFilter", "all")
+        max_jobs = int(actor_input.get("maxJobs") or 100)
 
-        # Get input parameters
-        url: str = (actor_input.get('url') or '').strip()
-        keyword: str = (actor_input.get('keyword') or '').strip()
-        location: str = (actor_input.get('location') or '').strip()
-        job_date: str = (actor_input.get('jobDate') or '').strip()
-        max_jobs: int = int(actor_input.get('maxJobs') or 0)
-        
-        # Remoteok doesn't have traditional pagination - all jobs are in one JSON response
-        # We'll implement our own pagination by processing jobs in batches
-        batch_size: int = int(actor_input.get('batchSize') or 50)
-        
-        # Get proxy configuration
-        proxy_config = actor_input.get('proxyConfiguration')
-        proxy_url = None
-        effective_proxy: Optional[str] = None
-        
-        if proxy_config:
-            use_apify_proxy = proxy_config.get('useApifyProxy', False)
-            if use_apify_proxy:
-                # Get Apify proxy URL from the Actor configuration
-                proxy_url = Actor.create_proxy_configuration(actor_proxy_input=proxy_config)
-                if proxy_url:
-                    Actor.log.info('Using Apify Proxy to avoid IP blocking')
-            elif proxy_config.get('proxyUrls'):
-                # Use custom proxy if provided
-                proxy_urls = proxy_config.get('proxyUrls', [])
-                if proxy_urls:
-                    proxy_url = random.choice(proxy_urls)
-                    Actor.log.info(f'Using custom proxy')
-        
-        # Validate that at least one filter is provided
-        if not any([url, keyword, location, job_date]):
-            Actor.log.info('Provide at least one filter: url, keyword, location, or jobDate. Exiting...')
-            await Actor.exit()
+        proxy_config = actor_input.get("proxyConfiguration")
+        proxies = None
+        if proxy_config and proxy_config.get("proxyUrls"):
+            proxies = random.choice(proxy_config["proxyUrls"])
 
-        # Set API URL - use custom URL if provided, otherwise use Remoteok default
-        if url:
-            api_url = url
-            Actor.log.info(f'Using custom API URL: {api_url}')
-        else:
-            api_url = 'https://remoteok.com/remote-jobs.json'
-            Actor.log.info(f'Using default Remoteok API: {api_url}')
-        
-        # Configure HTTP client
-        client_kwargs = {
-            'timeout': 30.0,
-            'follow_redirects': True,
-        }
-        
-        if proxy_url:
-            # For Apify proxy, we need to get the actual proxy URL string
-            if hasattr(proxy_url, 'new_url'):
-                # ProxyConfiguration object - get a new URL for each session
-                proxy_str = await proxy_url.new_url()
-                client_kwargs['proxies'] = proxy_str
-                effective_proxy = proxy_str
-                Actor.log.info(f'Configured session with Apify Proxy')
-            elif isinstance(proxy_url, str):
-                client_kwargs['proxies'] = proxy_url
-                effective_proxy = proxy_url
-                Actor.log.info(f'Configured session with custom proxy')
-        
-        async with httpx.AsyncClient(**client_kwargs) as session:
-            Actor.log.info(f'Fetching jobs from API: {api_url}')
-            
-            # Fetch all jobs from the JSON API
-            response = await session.get(api_url)
-            if response.status_code != 200:
-                Actor.log.error(f'Failed to fetch jobs from API. Status: {response.status_code}')
-                await Actor.exit()
-            
-            try:
-                jobs_data = response.json()
-            except Exception as e:
-                Actor.log.error(f'Failed to parse JSON response: {e}')
-                await Actor.exit()
-            
-            # Remove the first item which contains API terms (Remoteok specific)
-            if not url and jobs_data and isinstance(jobs_data[0], dict) and 'legal' in jobs_data[0]:
-                jobs_data = jobs_data[1:]
-            
-            Actor.log.info(f'Fetched {len(jobs_data)} jobs from API')
-            
-            total_pushed = 0
-            seen_urls: Set[str] = set()
-            
-            # Process jobs in batches
-            for i in range(0, len(jobs_data), batch_size):
-                batch = jobs_data[i:i + batch_size]
-                batch_jobs = 0
-                
-                for job_data in batch:
-                    # Apply filters
-                    should_include = True
-                    
-                    # Filter by keyword if provided
-                    if keyword:
-                        # Check if keyword appears in position, company, description, or tags
-                        searchable_text = ' '.join([
-                            job_data.get('position', ''),
-                            job_data.get('company', ''),
-                            job_data.get('description', ''),
-                            ' '.join(job_data.get('tags', []))
-                        ]).lower()
-                        
-                        if keyword.lower() not in searchable_text:
-                            should_include = False
-                    
-                    # Filter by location if provided
-                    if should_include and location:
-                        job_location = job_data.get('location', '').lower()
-                        if location.lower() not in job_location:
-                            should_include = False
-                    
-                    # Filter by job date if provided
-                    if should_include and job_date:
-                        job_posting_date = job_data.get('date', '')
-                        if job_posting_date < job_date:
-                            should_include = False
-                    
-                    # Skip job if it doesn't match filters
-                    if not should_include:
-                        continue
-                    
-                    # Convert Remoteok job data to our standardized format
-                    job_item = {
-                        'job_title': job_data.get('position', ''),
-                        'company': job_data.get('company', ''),
-                        'location': job_data.get('location', 'Remote'),
-                        'date_posted': job_data.get('date', ''),
-                        'job_type': 'Remote',  # All Remoteok jobs are remote
-                        'job_url': job_data.get('url', ''),
-                        'description_text': job_data.get('description', ''),
-                        'description_html': None,  # Remoteok provides plain text
-                        'salary': format_salary(job_data.get('salary_min', None), job_data.get('salary_max', None)),
-                        'tags': job_data.get('tags', []),
-                        'source_url': api_url,
-                        'remoteok_id': job_data.get('id'),
-                        'company_logo': job_data.get('company_logo', ''),
-                    }
-                    
-                    # Skip if no URL or already seen
-                    job_url = job_item.get('job_url')
-                    if not job_url or job_url in seen_urls:
-                        continue
-                    
-                    await Actor.push_data(job_item)
-                    total_pushed += 1
-                    batch_jobs += 1
-                    seen_urls.add(job_url)
-                    
-                    # Check max jobs limit
-                    if max_jobs > 0 and total_pushed >= max_jobs:
-                        break
-                
-                Actor.log.info(f'Processed batch {i//batch_size + 1}: pushed {batch_jobs} jobs (total {total_pushed})')
-                
-                # Check max jobs limit
-                if max_jobs > 0 and total_pushed >= max_jobs:
-                    Actor.log.info(f'Reached maxJobs limit ({max_jobs}). Stopping.')
-                    break
-                
-                # Small delay between batches to be respectful
-                if i + batch_size < len(jobs_data):
-                    await asyncio.sleep(0.5)
-            
-            Actor.log.info(f'Scrape complete. Total items: {total_pushed}.')
+        stealth = StealthConfig(browser="chrome")
+        async with AsyncSession(
+            impersonate="chrome110",
+            http2=True,
+            proxies=proxies,
+            timeout=45,
+            middleware=[StealthMiddleware(stealth)],
+        ) as session:
+            Actor.log.info("Fetching RemoteOK page with stealth...")
+            html = await fetch_html(session, REMOTEOK_URL)
+            jobs = parse_jobs_from_html(html)
+            Actor.log.info(f"Fetched {len(jobs)} jobs from RemoteOK HTML.")
+
+            filtered = filter_jobs(jobs, keyword, location, date_filter)
+            Actor.log.info(f"{len(filtered)} jobs matched filters.")
+
+            total = 0
+            for job in filtered[:max_jobs]:
+                await Actor.push_data(job)
+                total += 1
+
+            Actor.log.info(f"✅ Scrape complete. Pushed {total} jobs.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

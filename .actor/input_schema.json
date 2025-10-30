@@ -1,16 +1,9 @@
 {
-  "title": "Remoteok Job Scraper Input",
-  "description": "Scrape remote job listings from Remoteok.com or custom job API endpoints. Filter by keywords, location, and job posting date.",
+  "title": "RemoteOK Job Scraper Input",
+  "description": "Scrape remote job listings from RemoteOK.com. Filter by keywords, location, and job posting date.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "url": {
-      "title": "API URL",
-      "type": "string",
-      "description": "Custom API endpoint URL. If not provided, uses Remoteok's default JSON API (https://remoteok.com/remote-jobs.json). Should return JSON array of job objects.",
-      "editor": "textfield",
-      "prefill": "https://remoteok.com/remote-jobs.json"
-    },
     "keyword": {
       "title": "Search Keyword",
       "type": "string",
@@ -24,35 +17,37 @@
       "description": "Filter jobs by location (e.g., 'San Francisco', 'New York', 'Remote'). Case-insensitive partial matching.",
       "editor": "textfield"
     },
-    "jobDate": {
-      "title": "Minimum Job Date",
+    "dateFilter": {
+      "title": "Date Filter",
       "type": "string",
-      "description": "Filter jobs posted after this date (YYYY-MM-DD format). Example: '2024-01-01'",
-      "editor": "textfield",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+      "description": "Filter jobs by posting date",
+      "enum": ["all", "today", "week", "month"],
+      "enumTitles": ["All time", "Posted today", "Posted this week", "Posted this month"],
+      "default": "all",
+      "editor": "select"
     },
     "maxJobs": {
       "title": "Maximum Jobs",
       "type": "integer",
-      "description": "Maximum number of jobs to collect. Set to 0 for unlimited (will process all matching jobs).",
-      "minimum": 0,
-      "default": 100,
+      "description": "Maximum number of jobs to collect. Set to 200 or higher for comprehensive results.",
+      "minimum": 1,
+      "default": 200,
       "editor": "number"
     },
-    "batchSize": {
-      "title": "Batch Size",
+    "maxPages": {
+      "title": "Maximum Pages",
       "type": "integer",
-      "description": "Number of jobs to process in each batch. Larger batches are faster but use more memory.",
+      "description": "Maximum number of pages to scrape. Each page contains approximately 20-50 jobs.",
       "minimum": 1,
-      "default": 50,
+      "default": 10,
       "editor": "number"
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Proxy settings for accessing the job API. Use Apify Proxy for best results.",
+      "description": "Proxy settings for accessing RemoteOK. Recommended to use Apify Proxy to avoid 403 blocks.",
       "editor": "proxy",
-      "default": { "useApifyProxy": false }
+      "default": { "useApifyProxy": true }
     }
   },
   "required": []

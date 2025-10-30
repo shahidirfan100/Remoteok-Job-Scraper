@@ -1,13 +1,13 @@
 {
     "actorSpecification": 1,
     "name": "remoteok-job-scraper",
-    "title": "Remoteok Job Scraper",
-    "description": "Scrapes remote job listings from Remoteok.com using their JSON API. Extracts job titles, companies, locations, salaries, and descriptions for remote work opportunities.",
+    "title": "RemoteOK Job Scraper",
+    "description": "Scrapes remote job listings from RemoteOK.com with anti-bot protection. Extracts job titles, companies, locations, tags, and descriptions for remote work opportunities. Uses curl_cffi for TLS fingerprint spoofing to bypass 403 blocks.",
     "version": "1.0.0",
     "buildTag": "latest",
     "meta": {
         "templateId": "python-crawlee-beautifulsoup",
-        "model": "GPT-5"
+        "model": "claude-3.5-sonnet"
     },
     "input": "./input_schema.json",
     "output": "./output_schema.json",

@@ -171,12 +171,15 @@ def parse_jobs_from_api(api_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             # Extract logo
             logo = item.get("logo") or item.get("company_logo")
             
-            # Extract date posted
-            date_posted = item.get("date") or item.get("epoch")
-            if isinstance(date_posted, (int, float)):
-                # Convert epoch timestamp to ISO format
-                from datetime import datetime
-                date_posted = datetime.fromtimestamp(date_posted).isoformat()
+            # Extract date posted - handle both ISO string and epoch timestamp
+            date_posted = item.get("date")
+            epoch_time = item.get("epoch")
+            
+            # Prefer the date string if available, otherwise convert epoch
+            if not date_posted and epoch_time:
+                if isinstance(epoch_time, (int, float)):
+                    # Convert epoch timestamp to ISO format
+                    date_posted = datetime.fromtimestamp(epoch_time).isoformat()
             
             # Extract description
             description = item.get("description") or ""
@@ -192,7 +195,7 @@ def parse_jobs_from_api(api_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "location": location,
                 "tags": tags,
                 "logo": logo,
-                "date_posted": date_posted,
+                "date_posted": str(date_posted) if date_posted else None,
                 "description_html": description,
                 "description_text": description,
                 "salary_min": salary_min,

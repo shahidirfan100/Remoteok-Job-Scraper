@@ -257,13 +257,15 @@ def filter_jobs(jobs: List[Dict[str, Any]], keyword=None, location=None, date_fi
             ]
         ).lower()
 
-        # Apply keyword filter
-        if keyword and keyword.lower() not in text:
-            continue
-            
-        # Apply location filter
-        if location and location.lower() not in str(j.get("location", "")).lower():
-            continue
+        # Apply keyword filter only if keyword is set and non-empty
+        if keyword and keyword.strip():
+            if keyword.lower() not in text:
+                continue
+
+        # Apply location filter only if location is set and non-empty
+        if location and location.strip():
+            if location.lower() not in str(j.get("location", "")).lower():
+                continue
             
         # Apply date filter
         if days and j.get("date_posted"):

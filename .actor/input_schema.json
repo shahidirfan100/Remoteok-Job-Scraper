@@ -1,6 +1,6 @@
 {
   "title": "RemoteOK Job Scraper Input",
-  "description": "Scrape remote job listings from RemoteOK.com. Filter by keywords, location, and job posting date.",
+  "description": "Scrape remote job listings from RemoteOK.com using their JSON API. Filter by keywords, location, and job posting date.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
@@ -29,23 +29,15 @@
     "maxJobs": {
       "title": "Maximum Jobs",
       "type": "integer",
-      "description": "Maximum number of jobs to collect. Set to 200 or higher for comprehensive results.",
+      "description": "Maximum number of jobs to collect from the API. The API returns all jobs in one request.",
       "minimum": 1,
       "default": 200,
-      "editor": "number"
-    },
-    "maxPages": {
-      "title": "Maximum Pages",
-      "type": "integer",
-      "description": "Maximum number of pages to scrape. Each page contains approximately 20-50 jobs.",
-      "minimum": 1,
-      "default": 10,
       "editor": "number"
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Proxy settings for accessing RemoteOK. Recommended to use Apify Proxy to avoid 403 blocks.",
+      "description": "Proxy settings for accessing RemoteOK API. Recommended to use Apify Proxy to avoid potential rate limiting.",
       "editor": "proxy",
       "default": { "useApifyProxy": true }
     }

@@ -2,11 +2,6 @@
 RemoteOK Job Scraper (Full Stealth + Pagination)
 Stack: Python + Crawlee + BeautifulSoup + StealthKit + curl_cffi[http2] + lxml
 Author: Jobs Counsel
-Description:
-    - Scrapes multiple pages of RemoteOK without Cloudflare blocking.
-    - Uses stealth TLS (curl_cffi) and Chrome fingerprint emulation.
-    - Extracts title, company, location, type, tags, salary, and descriptions.
-    - Supports filters (keyword, location, date) and pagination.
 """
 
 from __future__ import annotations
@@ -19,10 +14,29 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from apify import Actor
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
-from stealthkit import StealthConfig, StealthMiddleware
 
+# --- UNIVERSAL STEALTHKIT IMPORT (works with all versions) ---
+try:
+    from stealthkit.stealth import StealthConfig, StealthMiddleware  # ≥0.4
+except ImportError:
+    try:
+        from stealthkit import StealthConfig, StealthMiddleware      # 0.3.x
+    except ImportError:
+        try:
+            from stealthkit.config import StealthConfig               # <0.3
+            from stealthkit.middleware import StealthMiddleware
+        except ImportError:
+            # fallback dummy classes to allow script to run without stealthkit
+            class StealthConfig:
+                def __init__(self, *_, **__): ...
+            class StealthMiddleware:
+                def __init__(self, *_, **__): ...
+            print("[WARN] ⚠️ StealthKit not fully available; using dummy classes.")
 
-# ===================== CONFIG ===================== #
+# ============================================================ #
+#                        CONFIGURATION                         #
+# ============================================================ #
+
 REMOTEOK_URL = "https://remoteok.com/remote-jobs"
 
 USER_AGENTS = [
@@ -35,9 +49,11 @@ USER_AGENTS = [
 DATE_WINDOWS = {"today": 1, "week": 7, "month": 31}
 
 
-# ===================== CORE SCRAPER ===================== #
+# ============================================================ #
+#                        SCRAPER CORE                          #
+# ============================================================ #
+
 async def fetch_html(session: AsyncSession, url: str) -> str:
-    """Stealth fetch with realistic headers."""
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -47,20 +63,16 @@ async def fetch_html(session: AsyncSession, url: str) -> str:
         "Referer": "https://google.com/",
         "Connection": "keep-alive",
     }
-
     resp = await session.get(url, headers=headers, timeout=60)
     if resp.status_code != 200:
-        raise RuntimeError(f"Failed to fetch {url} (HTTP {resp.status_code})")
+        raise RuntimeError(f"Failed to fetch {url} (status {resp.status_code})")
     return resp.text
 
 
 def parse_jobs(html: str) -> List[Dict[str, Any]]:
-    """Parse job cards from RemoteOK HTML."""
     soup = BeautifulSoup(html, "lxml")
-    job_rows = soup.select("tr.job")
-    jobs: List[Dict[str, Any]] = []
-
-    for row in job_rows:
+    jobs = []
+    for row in soup.select("tr.job"):
         try:
             title = row.select_one('h2[itemprop="title"]')
             company = row.select_one('h3[itemprop="name"]')
@@ -82,32 +94,29 @@ def parse_jobs(html: str) -> List[Dict[str, Any]]:
                 "source_url": REMOTEOK_URL,
                 "collected_at": datetime.utcnow().isoformat(),
             }
-            # Guess job type
+
+            # derive job type from tags
             job_type = None
             for tag in job["tags"]:
-                if "full" in tag.lower():
+                tag_low = tag.lower()
+                if "full" in tag_low:
                     job_type = "Full-time"
-                elif "part" in tag.lower():
+                elif "part" in tag_low:
                     job_type = "Part-time"
-                elif "contract" in tag.lower():
+                elif "contract" in tag_low:
                     job_type = "Contract"
             job["job_type"] = job_type or "Remote"
+
             jobs.append(job)
         except Exception:
             continue
     return jobs
 
 
-def filter_jobs(
-    jobs: List[Dict[str, Any]],
-    keyword: Optional[str],
-    location: Optional[str],
-    date_filter: Optional[str],
-) -> List[Dict[str, Any]]:
-    """Apply filters for keyword, location, and posting age."""
+def filter_jobs(jobs: List[Dict[str, Any]], keyword=None, location=None, date_filter=None):
     now = datetime.utcnow()
     days = DATE_WINDOWS.get(date_filter)
-    filtered = []
+    result = []
     for j in jobs:
         text = " ".join(
             [
@@ -118,6 +127,7 @@ def filter_jobs(
                 j.get("description_text", ""),
             ]
         ).lower()
+
         if keyword and keyword.lower() not in text:
             continue
         if location and location.lower() not in j.get("location", "").lower():
@@ -129,12 +139,11 @@ def filter_jobs(
                     continue
             except Exception:
                 pass
-        filtered.append(j)
-    return filtered
+        result.append(j)
+    return result
 
 
 def next_page_url(current_url: str) -> str:
-    """Increment page parameter (pg=) for pagination."""
     parts = urlparse(current_url)
     qs = parse_qs(parts.query)
     page = int(qs.get("pg", [1])[0]) + 1
@@ -146,17 +155,19 @@ async def random_delay(min_ms=700, max_ms=1500):
     await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
 
 
-# ===================== MAIN ACTOR ===================== #
+# ============================================================ #
+#                            MAIN                              #
+# ============================================================ #
+
 async def main() -> None:
-    """Main Apify Actor entrypoint."""
     async with Actor:
-        actor_input = await Actor.get_input() or {}
-        keyword = actor_input.get("keyword")
-        location = actor_input.get("location")
-        date_filter = actor_input.get("dateFilter", "all")
-        max_jobs = int(actor_input.get("maxJobs", 200))
-        max_pages = int(actor_input.get("maxPages", 10))
-        proxy_conf = actor_input.get("proxyConfiguration")
+        inp = await Actor.get_input() or {}
+        keyword = inp.get("keyword")
+        location = inp.get("location")
+        date_filter = inp.get("dateFilter", "all")
+        max_jobs = int(inp.get("maxJobs", 200))
+        max_pages = int(inp.get("maxPages", 10))
+        proxy_conf = inp.get("proxyConfiguration")
 
         proxies = None
         if proxy_conf and proxy_conf.get("proxyUrls"):
@@ -170,6 +181,7 @@ async def main() -> None:
             timeout=60,
             middleware=[StealthMiddleware(stealth)],
         ) as session:
+
             page_url = REMOTEOK_URL
             seen: Set[str] = set()
             total_saved = 0
@@ -188,7 +200,7 @@ async def main() -> None:
                     break
 
                 filtered = filter_jobs(jobs, keyword, location, date_filter)
-                Actor.log.info(f"Page {page}: {len(filtered)} / {len(jobs)} jobs matched filters.")
+                Actor.log.info(f"Page {page}: {len(filtered)} / {len(jobs)} matched filters.")
 
                 for job in filtered:
                     if total_saved >= max_jobs:
@@ -205,7 +217,7 @@ async def main() -> None:
                 await random_delay(800, 2000)
                 page_url = next_page_url(page_url)
 
-            Actor.log.info(f"🎯 Finished. Collected {total_saved} job postings.")
+            Actor.log.info(f"🎯 Done! Collected {total_saved} job postings.")
 
 
 if __name__ == "__main__":
